@@ -11,7 +11,7 @@ def get_world_rays(
     intrinsics: torch.Tensor,
     cam2world: torch.Tensor,
 ) -> torch.Tensor:
-    """Generates camera rays in the world frame.
+    """Generates perspective camera rays in the world frame.
 
     Args:
         xy_pix: 2D pixel coordinates of shape (..., 2)
@@ -26,6 +26,44 @@ def get_world_rays(
 
     # Get ray directions in cam coordinates
     ray_dirs_cam = get_unnormalized_cam_ray_directions(xy_pix, intrinsics)
+
+    # Homogenize ray directions
+    rd_cam_hom = homogenize_vecs(ray_dirs_cam)
+
+    # Transform ray directions to world coordinates
+    rd_world_hom = transform_cam2world(rd_cam_hom, cam2world)
+
+    # Tile the ray origins to have the same shape as the ray directions.
+    # Currently, ray origins have shape (batch, 3), while ray directions have shape (batch, num_rays, 3)
+    cam_origin_world = cam_origin_world.unsqueeze(1).tile((1, rd_world_hom.shape[1], 1))
+
+    # Return tuple of cam_origins, ray_world_directions
+    return cam_origin_world, rd_world_hom[..., :3]
+
+
+def get_orthographic_world_rays(
+    xy_pix: torch.Tensor,
+    intrinsics: torch.Tensor,
+    cam2world: torch.Tensor,
+) -> torch.Tensor:
+    """Generates orthographic camera rays in the world frame.
+
+    Args:
+        xy_pix: 2D pixel coordinates of shape (..., 2)
+        intrinsics: Camera intrinscics of shape (..., 3, 3)
+        cam2world: Camera pose of shape (..., 4, 4)
+
+    Returns:
+        cam_origins: The camera origins in the world frame of shape (..., 3)
+        ray_world_directions: The orthographic ray directions in the world frame of shape (..., 3)
+    """
+    cam_origin_world = cam2world[..., :3, 3]
+
+    # Get ray directions in cam coordinates
+    # An orthographic camera has a focal length of 1
+    orthographic_intrinsics = intrinsics.clone()
+    orthographic_intrinsics[..., 0:2, 0:2] = torch.eye(2)
+    ray_dirs_cam = get_unnormalized_cam_ray_directions(xy_pix, orthographic_intrinsics)
 
     # Homogenize ray directions
     rd_cam_hom = homogenize_vecs(ray_dirs_cam)
@@ -109,12 +147,13 @@ def volume_integral(
 
 
 class VolumeRenderer(nn.Module):
-    def __init__(self, near, far, n_samples=32, white_back=True, rand=False):
+    def __init__(self, near, far, n_samples=32, white_back=True, rand=False, orthographic=False):
         super().__init__()
         self.near = near
         self.far = far
         self.n_samples = n_samples
         self.white_back = white_back
+        self.orthographic = orthographic
 
     def unpack_input_dict(self, input_dict: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         c2w = input_dict["cam2world"]
@@ -140,11 +179,14 @@ class VolumeRenderer(nn.Module):
             depth_map: for each pixel coordinate x_pix, the depth of the respective ray.
 
         """
-        cam2world, intrinsics, x_pix = self.unpack_input_dict(input_dict)
-        batch_size, num_rays = x_pix.shape[0], x_pix.shape[1]
+        cam2world, intrinsics, xy_pix = self.unpack_input_dict(input_dict)
+        batch_size, num_rays = xy_pix.shape[0], xy_pix.shape[1]
 
         # Compute the ray directions in world coordinates.
-        ros, rds = get_world_rays(x_pix, intrinsics, cam2world)
+        if self.orthographic:
+            ros, rds = get_orthographic_world_rays(xy_pix, intrinsics, cam2world)
+        else:
+            ros, rds = get_world_rays(xy_pix, intrinsics, cam2world)
 
         # Generate the points along rays and their depth values.
         pts, z_vals = sample_points_along_rays(

@@ -48,7 +48,7 @@ def transform_cam2world(xyz_cam_hom: torch.Tensor, cam2world: torch.Tensor) -> t
 
 
 def unproject(xy_pix: torch.Tensor, z: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
-    """Unproject (lift) 2D pixel coordinates x_pix and per-pixel z coordinate
+    """Unproject (lift) 2D pixel coordinates xy_pix and per-pixel z coordinate
     to 3D points in camera coordinates.
     Args:
         xy_pix: 2D pixel coordinates of shape (..., 2)
