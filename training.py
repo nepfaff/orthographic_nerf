@@ -1,4 +1,5 @@
 from typing import Iterator, Tuple
+import time
 
 import torch
 import numpy as np
@@ -16,7 +17,11 @@ def fit_inverse_graphics_representation(
     lr: float = 1e-4,
     steps_til_summary: int = 100,
 ):
-    optim = torch.optim.Adam(lr=lr, params=representation.parameters())
+    start_time = time.time()
+
+    optim = torch.optim.Adam(
+        lr=lr, weight_decay=1e-6, params=representation.parameters()
+    )
 
     losses = []
     for step in range(total_steps):
@@ -54,6 +59,8 @@ def fit_inverse_graphics_representation(
         optim.zero_grad()
         loss.backward()
         optim.step()
+
+    print(f"Fitting took {time.time()-start_time} seconds.")
 
     # Plot the loss
     fig, axes = plt.subplots(1, 1, figsize=(8, 8), squeeze=False)

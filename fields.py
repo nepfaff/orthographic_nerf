@@ -4,6 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
+import tinycudann as tcnn
 
 
 def init_weights_normal(m):
@@ -29,7 +30,9 @@ class VoxelGrid(nn.Module):
         Returns:
             values: (batch_size, num_points, out_dim)
         """
-        coord = coordinate.unsqueeze(2).unsqueeze(3)  # Shape (batch_size, num_points, 1, 1, 3)
+        coord = coordinate.unsqueeze(2).unsqueeze(
+            3
+        )  # Shape (batch_size, num_points, 1, 1, 3)
 
         values = F.grid_sample(self.grid, coord, self.mode)
 
@@ -65,11 +68,20 @@ class NeuralField(nn.Module):
 
 
 class HybridVoxelNeuralField(nn.Module):
-    def __init__(self, resolution_per_dim: int, feature_dim: int, out_dim: int, device: torch.device, mode="bilinear"):
+    def __init__(
+        self,
+        resolution_per_dim: int,
+        feature_dim: int,
+        out_dim: int,
+        device: torch.device,
+        mode="bilinear",
+    ):
         super().__init__()
 
         self.mode = mode
-        self.grid = nn.Parameter(torch.randn((1, feature_dim, *resolution_per_dim)) * 0.1)
+        self.grid = nn.Parameter(
+            torch.randn((1, feature_dim, *resolution_per_dim)) * 0.1
+        )
 
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
@@ -84,7 +96,9 @@ class HybridVoxelNeuralField(nn.Module):
         self.mlp.apply(init_weights_normal)
 
     def forward(self, coordinate):
-        coord = coordinate.unsqueeze(2).unsqueeze(3)  # Shape (batch_size, num_points, 1, 1, 3)
+        coord = coordinate.unsqueeze(2).unsqueeze(
+            3
+        )  # Shape (batch_size, num_points, 1, 1, 3)
         values = F.grid_sample(self.grid, coord, self.mode)
 
         # Permute the features from the grid_sample such that the feature dimension is the innermost dimension.
@@ -97,11 +111,20 @@ class HybridVoxelNeuralField(nn.Module):
 
 
 class HybridGroundPlanNeuralField(nn.Module):
-    def __init__(self, resolution_per_dim: int, feature_dim: int, out_dim: int, device: torch.device, mode="bilinear"):
+    def __init__(
+        self,
+        resolution_per_dim: int,
+        feature_dim: int,
+        out_dim: int,
+        device: torch.device,
+        mode="bilinear",
+    ):
         super().__init__()
 
         self.mode = mode
-        self.grid = nn.Parameter(torch.randn((1, feature_dim, *resolution_per_dim)) * 0.1)
+        self.grid = nn.Parameter(
+            torch.randn((1, feature_dim, *resolution_per_dim)) * 0.1
+        )
 
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim + 1, feature_dim),
@@ -147,37 +170,112 @@ class HybridGroundPlanNeuralField(nn.Module):
         return values
 
 
+class HybridHashGridNeuralField(nn.Module):
+    def __init__(
+        self,
+        out_dim: int,
+        device: torch.device,
+        num_layers: int = 2,
+        hidden_dim: int = 64,
+        num_levels: int = 16,
+        log2_hashmap_size: int = 15,
+        per_level_scale: float = 1.5,
+    ):
+        super().__init__()
+
+        self.out_dim = out_dim
+
+        base_res: int = 16
+        features_per_level: int = 2
+
+        self.mlp = tcnn.NetworkWithInputEncoding(
+            n_input_dims=3,
+            n_output_dims=out_dim,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": num_levels,
+                "n_features_per_level": features_per_level,
+                "log2_hashmap_size": log2_hashmap_size,
+                "base_resolution": base_res,
+                "per_level_scale": per_level_scale,
+            },
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": hidden_dim,
+                "n_hidden_layers": num_layers - 1,
+            },
+        ).to(device)
+
+    def forward(self, coordinate):  # coordinate shape (batch_size, num_points, 3)
+        coords_flat = coordinate.view(-1, 3)  # Shape (batch_size*num_ponts, 3)
+        values_flat = self.mlp(coords_flat)
+        values = values_flat.view(*coordinate.shape[:2], self.out_dim)
+        return values
+
+
 class RadianceField(nn.Module):
     def __init__(self, scene_rep_name: str, device: torch.device):
         super().__init__()
 
         if scene_rep_name == "VoxelGrid":
-            self.scene_rep = VoxelGrid(resolution_per_dim=(200, 200, 200), out_dim=64).to(
+            feature_dim = 64
+            self.scene_rep = VoxelGrid(
+                resolution_per_dim=(200, 200, 200), out_dim=feature_dim
+            ).to(
                 device
             )  # Results in about 16GB GPU memory
         elif scene_rep_name == "NeuralField":
-            self.scene_rep = NeuralField(feature_dim=64, out_dim=64, device=device)
+            feature_dim = 64
+            self.scene_rep = NeuralField(
+                feature_dim=64, out_dim=feature_dim, device=device
+            )
         elif scene_rep_name == "HybridVoxelNeuralField":
+            feature_dim = 64
             self.scene_rep = HybridVoxelNeuralField(
-                resolution_per_dim=(64, 64, 64), feature_dim=64, out_dim=64, device=device
+                resolution_per_dim=(64, 64, 64),
+                feature_dim=64,
+                out_dim=64,
+                device=device,
             ).to(device)
         elif scene_rep_name == "HybridGroundPlanNeuralField":
+            feature_dim = 64
             self.scene_rep = HybridGroundPlanNeuralField(
-                resolution_per_dim=(64, 64), feature_dim=64, out_dim=64, device=device
+                resolution_per_dim=(64, 64),
+                feature_dim=64,
+                out_dim=feature_dim,
+                device=device,
+            ).to(device)
+        elif scene_rep_name == "HybridHashGridNeuralField":
+            feature_dim = 16
+            self.scene_rep = HybridHashGridNeuralField(
+                out_dim=feature_dim, device=device
             ).to(device)
 
         self.sigma = nn.Sequential(
             nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(feature_dim, 1),
             nn.ReLU(),
         ).to(device)
         self.sigma.apply(init_weights_normal)
 
-        self.radiance = nn.Sequential(
-            nn.ReLU(),
-            nn.Linear(64, 3),
-            nn.ReLU(),
-        ).to(device)
+        if scene_rep_name == "HybridHashGridNeuralField":
+            self.radiance = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(feature_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 64),
+                nn.ReLU(),
+                nn.Linear(64, 3),
+                nn.Sigmoid(),
+            ).to(device)
+        else:
+            self.radiance = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(feature_dim, 3),
+                nn.ReLU(),
+            ).to(device)
         self.radiance.apply(init_weights_normal)
 
     def forward(self, xyz: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -192,6 +290,7 @@ class RadianceField(nn.Module):
             rad: The radiance values of shape (batch_size, num_points, 3).
         """
         features = self.scene_rep(xyz)
+        features = features.type(torch.float32)  # Ensure consistent dtype
 
         sigma = self.sigma(features)
         rad = self.radiance(features)
